@@ -1,3 +1,3 @@
-"# -"  
-"# -"  
-"# -" 
+Src_Code.py用于存储后端Pyhton代码
+Web_Code用于存储前端代码
+main.py用于存储总代码，运行main.py即可看到项目实际内容
