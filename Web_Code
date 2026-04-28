@@ -2,76 +2,337 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>通行证 - 校园组队平台</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>校园组队平台 · 整合版（注册无标签）</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        .markdown-content pre { background: #f1f5f9; padding: 0.75rem; border-radius: 0.75rem; overflow-x: auto; }
+        .markdown-content code { background: #e2e8f0; padding: 0.2rem 0.4rem; border-radius: 0.375rem; font-size: 0.875rem; }
+        .view-hidden { display: none !important; }
+    </style>
+</head>
+<body class="bg-slate-50 font-sans">
+
+    <div id="toast-container" class="fixed bottom-5 right-5 z-50 w-80 flex flex-col gap-2 pointer-events-none"></div>
+
+    <div id="loginView" class="min-h-screen flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-gray-100 relative overflow-hidden">
+            <div class="absolute top-0 left-0 w-full h-2 bg-indigo-500"></div>
+            <div class="mb-4 text-center text-sm text-gray-500 bg-gray-50 p-2 rounded">
+                🧪 演示账号：手机号 <code>13800138000</code> 或 学号 <code>202411111111</code><br>
+                密码统一为：<code>123456</code>
+            </div>
+            <form id="login-form" class="space-y-4">
+                <h1 class="text-3xl font-black text-center text-indigo-600 mb-6">校园组队平台</h1>
+                <input type="text" id="loginUsername" placeholder="学号 (12位) / 手机号" required
+                       class="w-full border p-3 rounded-lg outline-none focus:ring-2 ring-indigo-400">
+                <div class="relative">
+                    <input type="password" id="loginPassword" placeholder="密码" required
+                           class="w-full border p-3 rounded-lg outline-none pr-10 focus:ring-2 ring-indigo-400">
+                    <span onclick="toggleEye('loginPassword','loginEye')"
+                          class="absolute right-3 top-3 cursor-pointer opacity-60 hover:opacity-100 transition text-xl">👁️</span>
+                </div>
+                <button type="button" onclick="handleLogin()"
+                        class="w-full bg-indigo-600 text-white py-3 rounded-lg font-bold shadow-md hover:bg-indigo-700 transition">立即登录</button>
+                <div class="flex justify-end text-sm mt-4">
+                    <a href="#" onclick="toggleForm('reg-form')" class="text-indigo-600 font-bold hover:underline">没有账号？去注册</a>
+                </div>
+            </form>
+
+            <form id="reg-form" class="space-y-3 hidden">
+                <h2 class="text-xl font-bold text-center mb-4 border-b pb-2">新用户注册</h2>
+                <input type="text" id="regStudentId" placeholder="学号 (必须为12位数字)" maxlength="12" required
+                       class="w-full border p-2.5 rounded-lg outline-none focus:ring-2 ring-green-400">
+                <input type="text" id="regName" placeholder="真实姓名 / 昵称" required
+                       class="w-full border p-2.5 rounded-lg outline-none focus:ring-2 ring-green-400">
+                <input type="tel" id="regPhone" placeholder="手机号码" required
+                       class="w-full border p-2.5 rounded-lg outline-none focus:ring-2 ring-green-400">
+                <div class="relative">
+                    <input type="password" id="regPwd1" placeholder="设置密码" required
+                           class="w-full border p-2.5 rounded-lg outline-none pr-10 focus:ring-2 ring-green-400">
+                    <span onclick="toggleEye('regPwd1','regEye1')"
+                          class="absolute right-3 top-2.5 cursor-pointer opacity-60 hover:opacity-100 transition text-xl">👁️</span>
+                </div>
+                <div class="relative">
+                    <input type="password" id="regPwd2" placeholder="再次确认密码" required
+                           class="w-full border p-2.5 rounded-lg outline-none pr-10 focus:ring-2 ring-green-400">
+                    <span onclick="toggleEye('regPwd2','regEye2')"
+                          class="absolute right-3 top-2.5 cursor-pointer opacity-60 hover:opacity-100 transition text-xl">👁️</span>
+                </div>
+                <button type="button" onclick="handleRegister()"
+                        class="w-full bg-green-600 text-white py-2.5 rounded-lg font-bold hover:bg-green-700 transition mt-2">注册并登录</button>
+                <div class="text-center text-sm mt-2">
+                    <a href="#" onclick="toggleForm('login-form')" class="text-gray-500 hover:underline">返回登录</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="dashboardView" class="view-hidden bg-slate-50 p-4 md:p-8">
+        <div class="max-w-6xl mx-auto space-y-6">
+            <header class="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center">
+                <h1 class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">🚀 校园组队平台 · 招募大厅</h1>
+                <div class="flex items-center gap-3">
+                    <span id="userNameDisplay" class="text-sm font-bold text-gray-700"></span>
+                    <button onclick="logout()" class="text-sm bg-red-50 text-red-600 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg">退出登录</button>
+                    <div id="userAvatar" class="w-10 h-10 bg-indigo-500 rounded-full flex items-center justify-center text-white font-bold shadow-sm">我</div>
+                </div>
+            </header>
+            <div class="bg-white p-4 rounded-xl shadow-sm flex flex-wrap gap-4">
+                <input type="text" id="search-q" placeholder="🔍 搜索项目名称或详情..." class="border p-2 rounded flex-1 text-sm">
+                <input type="text" id="search-tag" placeholder="🏷️ 标签筛选" class="border p-2 rounded w-48 text-sm">
+                <button onclick="refreshDashboard()" class="bg-indigo-100 text-indigo-700 hover:bg-indigo-600 hover:text-white px-6 py-2 rounded-lg font-bold">快速搜索</button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
+                <div class="md:col-span-8">
+                    <h2 class="text-xl font-bold mb-4 border-l-4 border-indigo-500 pl-3">公共招募大厅</h2>
+                    <div id="projects-container" class="space-y-5">加载项目中...</div>
+                </div>
+                <div class="md:col-span-4">
+                    <div class="bg-gradient-to-br from-yellow-50 to-orange-50 p-6 rounded-2xl shadow-sm">
+                        <h2 class="font-bold mb-4 text-yellow-800">💡 猜你喜欢 (智能推荐)</h2>
+                        <div id="recommend-container">完善技能标签后，即可解锁精准推荐！</div>
+                        <div class="mt-3 text-xs text-gray-500">
+                            <button onclick="openProfileModal()" class="text-indigo-600 underline">📝 点此编辑我的技能标签</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="profileModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div class="bg-white p-6 rounded-2xl shadow-2xl w-full max-w-md">
+            <h3 class="text-xl font-bold mb-4">编辑个人信息</h3>
+            <label class="block text-sm font-bold text-gray-700 mb-1">技能/兴趣标签 (逗号分隔)</label>
+            <input type="text" id="editSkills" class="w-full border p-2 rounded mb-4" placeholder="例如: Python, 设计">
+            <div class="flex justify-end gap-3">
+                <button onclick="closeProfileModal()" class="px-4 py-2 bg-gray-200 rounded">取消</button>
+                <button onclick="saveSkills()" class="px-4 py-2 bg-indigo-600 text-white rounded">保存</button>
+            </div>
+        </div>
+    </div>
+
     <script>
-        function toggleForm(id) {
-            document.querySelectorAll('form').forEach(f => f.classList.add('hidden'));
-            document.getElementById(id).classList.remove('hidden');
+        let users = [];
+        let currentUser = null;
+
+        const MOCK_PROJECTS = [
+            { id: 1, title: "AI 医疗影像分析助手", leader_phone: "13800001111", leader_name: "张逸飞",
+              description: "基于深度学习的肺结节检测系统，使用 **PyTorch** 和 **MONAI**。\n\n要求：Python/深度学习基础。",
+              tags: "Python, PyTorch, 深度学习", base_members: 2, required_members: 5, status: "招募中", is_hidden: 0,
+              approved_count: 1, my_status: null },
+            { id: 2, title: "校园二手交易小程序", leader_phone: "13912345678", leader_name: "李思琪",
+              description: "技术栈：uni-app + Spring Boot + MySQL，急需前端和后端。",
+              tags: "小程序, Java, Spring Boot", base_members: 2, required_members: 4, status: "招募中", is_hidden: 0,
+              approved_count: 1, my_status: null },
+            { id: 3, title: "机器人竞赛——步兵机器人", leader_phone: "13777778888", leader_name: "王竞择",
+              description: "需要机械设计(SolidWorks)、嵌入式(STM32)、视觉(OpenCV)。",
+              tags: "机器人, STM32, OpenCV", base_members: 3, required_members: 6, status: "招募中", is_hidden: 0,
+              approved_count: 2, my_status: null }
+        ];
+
+        function showToast(sender, content) {
+            let container = document.getElementById('toast-container');
+            let toast = document.createElement('div');
+            toast.className = 'bg-white p-3 rounded-lg shadow-lg border-l-4 border-indigo-500 mb-2 transform transition-all duration-300';
+            toast.innerHTML = `<div class="font-bold text-sm">${sender}</div><div class="text-xs text-gray-600">${content}</div>`;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
         }
+
         function toggleEye(inputId, iconId) {
             let p = document.getElementById(inputId);
-            let i = document.getElementById(iconId);
-            if (p.type === 'password') {
-                p.type = 'text';
-                i.innerHTML = '🙈';
-            } else {
-                p.type = 'password';
-                i.innerHTML = '👁️';
+            if (p.type === 'password') { p.type = 'text'; } else { p.type = 'password'; }
+        }
+
+        function toggleForm(formId) {
+            document.getElementById('login-form').classList.add('hidden');
+            document.getElementById('reg-form').classList.add('hidden');
+            document.getElementById(formId).classList.remove('hidden');
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function renderMarkdown() {
+            if (typeof marked !== 'undefined') {
+                document.querySelectorAll('.markdown-content').forEach(el => {
+                    let raw = el.getAttribute('data-md') || '';
+                    el.innerHTML = marked.parse(raw);
+                });
             }
         }
+
+        function refreshDashboard() {
+            if (!currentUser) return;
+            let searchQ = document.getElementById('search-q')?.value || '';
+            let searchTag = document.getElementById('search-tag')?.value || '';
+            let mySkillsSet = new Set((currentUser.skills || '').split(',').map(s => s.trim()));
+
+            let filtered = MOCK_PROJECTS.filter(p => {
+                if (p.is_hidden && p.leader_phone !== currentUser.phone) return false;
+                if (searchQ && !p.title.toLowerCase().includes(searchQ.toLowerCase()) && !p.description.toLowerCase().includes(searchQ.toLowerCase())) return false;
+                if (searchTag && !p.tags.toLowerCase().includes(searchTag.toLowerCase())) return false;
+                return true;
+            });
+
+            if (filtered.length === 0) {
+                document.getElementById('projects-container').innerHTML = '<div class="text-center py-10 text-gray-400">暂无项目</div>';
+                document.getElementById('recommend-container').innerHTML = '暂无推荐';
+                return;
+            }
+
+            let scored = [];
+            filtered.forEach(p => {
+                let projTags = p.tags.split(',').map(t => t.trim());
+                let matchCount = projTags.filter(tag => mySkillsSet.has(tag)).length;
+                if (matchCount > 0) scored.push({ score: matchCount, proj: p });
+            });
+            scored.sort((a,b) => b.score - a.score);
+            let recommendHTML = scored.slice(0,3).map(s => `<div class="p-2 border-b text-sm"><span class="font-bold text-indigo-600">🔥 ${escapeHtml(s.proj.title)}</span><div class="text-xs text-gray-500">匹配度: ${s.score}</div></div>`).join('');
+            document.getElementById('recommend-container').innerHTML = recommendHTML || '<div class="text-sm text-gray-400">暂无推荐，编辑技能标签吧</div>';
+
+            let projectsHTML = '';
+            for (let p of filtered) {
+                let totalCurrent = p.base_members + p.approved_count;
+                let isFull = totalCurrent >= p.required_members;
+                let statusBadge = (isFull || p.status !== '招募中') ? '<span class="bg-red-500 text-white text-xs px-2 py-1 rounded">已满员/截止</span>' : '<span class="bg-green-500 text-white text-xs px-2 py-1 rounded">招募中</span>';
+                let actionBtn = '';
+                if (p.leader_phone === currentUser.phone) {
+                    actionBtn = '<span class="text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg text-sm">💡 您的项目</span>';
+                } else if (p.status === '招募中' && !isFull) {
+                    actionBtn = `<button onclick="simulateApply(${p.id}, '${escapeHtml(p.title)}')" class="bg-blue-100 hover:bg-blue-600 hover:text-white text-blue-700 px-4 py-1.5 rounded-lg text-sm font-bold">申请加入</button>`;
+                } else {
+                    actionBtn = '<span class="text-gray-400 text-sm">无法申请</span>';
+                }
+                projectsHTML += `
+                    <div class="bg-white p-5 rounded-xl shadow-sm border">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-xl font-bold">${escapeHtml(p.title)}</h3>
+                            <div>${statusBadge}</div>
+                        </div>
+                        <div class="flex gap-3 text-xs mb-3">
+                            <span class="bg-gray-100 px-2 py-1 rounded">队长: ${escapeHtml(p.leader_name)}</span>
+                            <span class="bg-orange-50 px-2 py-1 rounded">进度: ${totalCurrent}/${p.required_members}</span>
+                            <span class="bg-blue-50 px-2 py-1 rounded">标签: ${escapeHtml(p.tags)}</span>
+                        </div>
+                        <div class="text-sm text-gray-700 bg-gray-50 p-3 rounded markdown-content" data-md="${escapeHtml(p.description)}">加载中...</div>
+                        <div class="flex justify-end mt-3">${actionBtn}</div>
+                    </div>
+                `;
+            }
+            document.getElementById('projects-container').innerHTML = projectsHTML;
+            renderMarkdown();
+        }
+
+        function simulateApply(projId, title) {
+            showToast('申请提示', `已向《${title}》提交申请（演示）`);
+        }
+
+        function handleLogin() {
+            let username = document.getElementById('loginUsername').value.trim();
+            let pwd = document.getElementById('loginPassword').value.trim();
+            let user = users.find(u => (u.phone === username || u.studentId === username) && u.password === pwd);
+            if (!user) {
+                showToast('登录失败', '账号或密码错误，演示账号：13800138000 / 202411111111  密码 123456');
+                return;
+            }
+            currentUser = { ...user };
+            document.getElementById('userNameDisplay').innerText = currentUser.name;
+            document.getElementById('userAvatar').innerText = currentUser.name[0];
+            document.getElementById('loginView').classList.add('view-hidden');
+            document.getElementById('dashboardView').classList.remove('view-hidden');
+            refreshDashboard();
+            showToast('欢迎', `${currentUser.name}，欢迎回来！`);
+        }
+
+        function handleRegister() {
+            let studentId = document.getElementById('regStudentId').value.trim();
+            let name = document.getElementById('regName').value.trim();
+            let phone = document.getElementById('regPhone').value.trim();
+            let pwd1 = document.getElementById('regPwd1').value;
+            let pwd2 = document.getElementById('regPwd2').value;
+            if (!studentId || !name || !phone || !pwd1) {
+                showToast('注册失败', '请填写所有必填项');
+                return;
+            }
+            if (!/^\d{12}$/.test(studentId)) {
+                showToast('注册失败', '学号必须为12位数字');
+                return;
+            }
+            if (pwd1 !== pwd2) {
+                showToast('注册失败', '两次密码不一致');
+                return;
+            }
+            if (users.find(u => u.phone === phone)) {
+                showToast('注册失败', '手机号已被注册');
+                return;
+            }
+            if (users.find(u => u.studentId === studentId)) {
+                showToast('注册失败', '学号已被注册');
+                return;
+            }
+            let newUser = { phone, studentId, name, password: pwd1, skills: '' };
+            users.push(newUser);
+            currentUser = { ...newUser };
+            document.getElementById('userNameDisplay').innerText = currentUser.name;
+            document.getElementById('userAvatar').innerText = currentUser.name[0];
+            document.getElementById('loginView').classList.add('view-hidden');
+            document.getElementById('dashboardView').classList.remove('view-hidden');
+            refreshDashboard();
+            showToast('注册成功', `欢迎 ${name}！`);
+        }
+
+        function logout() {
+            currentUser = null;
+            document.getElementById('dashboardView').classList.add('view-hidden');
+            document.getElementById('loginView').classList.remove('view-hidden');
+            document.getElementById('loginUsername').value = '';
+            document.getElementById('loginPassword').value = '';
+            document.getElementById('login-form').classList.remove('hidden');
+            document.getElementById('reg-form').classList.add('hidden');
+            showToast('已退出', '您已安全退出');
+        }
+
+        function openProfileModal() {
+            if (!currentUser) return;
+            document.getElementById('editSkills').value = currentUser.skills || '';
+            document.getElementById('profileModal').classList.remove('hidden');
+        }
+        function closeProfileModal() {
+            document.getElementById('profileModal').classList.add('hidden');
+        }
+        function saveSkills() {
+            let newSkills = document.getElementById('editSkills').value.trim();
+            currentUser.skills = newSkills;
+            let idx = users.findIndex(u => u.phone === currentUser.phone);
+            if (idx !== -1) users[idx].skills = newSkills;
+            closeProfileModal();
+            refreshDashboard();
+            showToast('技能更新', '技能标签已保存，推荐内容已刷新');
+        }
+
+        users.push({
+            phone: "13800138000",
+            studentId: "202411111111",
+            name: "演示同学",
+            password: "123456",
+            skills: "Python, 深度学习"
+        });
+
+        window.onload = () => {
+            document.getElementById('loginView').classList.remove('view-hidden');
+            document.getElementById('dashboardView').classList.add('view-hidden');
+        };
     </script>
-</head>
-<body class="bg-slate-50 h-screen flex items-center justify-center font-sans p-4">
-    <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-gray-100 relative overflow-hidden">
-        <div class="absolute top-0 left-0 w-full h-2 bg-indigo-500"></div>
-
-        <!-- 登录表单 -->
-        <form id="login-form" action="/do_login" method="post" class="space-y-4">
-            <h1 class="text-3xl font-black text-center text-indigo-600 mb-6">校园组队平台</h1>
-            <input type="text" name="username" placeholder="学号 (12位) / 手机号" required
-                   class="w-full border p-3 rounded-lg outline-none focus:ring-2 ring-indigo-400">
-            <div class="relative">
-                <input type="password" id="lp" name="password" placeholder="密码" required
-                       class="w-full border p-3 rounded-lg outline-none pr-10 focus:ring-2 ring-indigo-400">
-                <span id="le" onclick="toggleEye('lp','le')"
-                      class="absolute right-3 top-3 cursor-pointer opacity-60 hover:opacity-100 transition text-xl">👁️</span>
-            </div>
-            <button type="submit"
-                    class="w-full bg-indigo-600 text-white py-3 rounded-lg font-bold shadow-md hover:bg-indigo-700 transition">立即登录</button>
-            <div class="flex justify-end text-sm mt-4">
-                <a href="#" onclick="toggleForm('reg-form')"
-                   class="text-indigo-600 font-bold hover:underline">没有账号？去注册</a>
-            </div>
-        </form>
-
-        <!-- 注册表单（初始隐藏） -->
-        <form id="reg-form" action="/do_register" method="post" class="space-y-3 hidden">
-            <h2 class="text-xl font-bold text-center mb-4 border-b pb-2">新用户注册</h2>
-            <input type="text" name="student_id" placeholder="学号 (必须为12位数字)" minlength="12" maxlength="12" pattern="\d{12}" required
-                   class="w-full border p-2.5 rounded-lg outline-none focus:ring-2 ring-green-400">
-            <input type="text" name="name" placeholder="真实姓名 / 昵称" required
-                   class="w-full border p-2.5 rounded-lg outline-none focus:ring-2 ring-green-400">
-            <input type="tel" name="phone" placeholder="手机号码" required
-                   class="w-full border p-2.5 rounded-lg outline-none focus:ring-2 ring-green-400">
-            <div class="relative">
-                <input type="password" id="rp1" name="password" placeholder="设置密码" required
-                       class="w-full border p-2.5 rounded-lg outline-none pr-10 focus:ring-2 ring-green-400">
-                <span id="re1" onclick="toggleEye('rp1','re1')"
-                      class="absolute right-3 top-2.5 cursor-pointer opacity-60 hover:opacity-100 transition text-xl">👁️</span>
-            </div>
-            <div class="relative">
-                <input type="password" id="rp2" name="confirm_password" placeholder="再次确认密码" required
-                       class="w-full border p-2.5 rounded-lg outline-none pr-10 focus:ring-2 ring-green-400">
-                <span id="re2" onclick="toggleEye('rp2','re2')"
-                      class="absolute right-3 top-2.5 cursor-pointer opacity-60 hover:opacity-100 transition text-xl">👁️</span>
-            </div>
-            <button type="submit"
-                    class="w-full bg-green-600 text-white py-2.5 rounded-lg font-bold hover:bg-green-700 transition mt-2">注册并登录</button>
-            <div class="text-center text-sm mt-2">
-                <a href="#" onclick="toggleForm('login-form')" class="text-gray-500 hover:underline">返回登录</a>
-            </div>
-        </form>
-    </div>
 </body>
-</html>    
+</html>
