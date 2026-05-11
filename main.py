@@ -21,6 +21,7 @@ def generate_session_id() -> str:
 
 # --- 2. 数据库初始化 ---
 def init_db():
+    # 优化：增加 timeout 防止轮询时出现 database is locked
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
         cursor = conn.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS users
@@ -137,7 +138,8 @@ def init_db():
                           ) REFERENCES users
                           (
                               phone
-                          ))''')
+                          )
+            )''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS applications
         (
             id
@@ -170,13 +172,15 @@ def init_db():
                           ) REFERENCES projects
                           (
                               id
-                          ), FOREIGN KEY
+                          ),
+            FOREIGN KEY
                           (
                               applicant_phone
                           ) REFERENCES users
                           (
                               phone
-                          ))''')
+                          )
+            )''')
 
         try:
             cursor.execute("ALTER TABLE applications ADD COLUMN leader_read INTEGER DEFAULT 0")
@@ -238,7 +242,37 @@ def init_db():
             phone,
             chat_type,
             target_id
-                          ))''')
+                          )
+            )''')
+
+        # ==========================================
+        # 🌟 新增：初始化测试数据
+        # ==========================================
+        # 检查 users 表是否为空，为空则说明是首次建库，插入测试数据
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            # 1. 插入测试体验账号
+            cursor.executemany(
+                '''INSERT INTO users (phone, student_id, name, password, college, major, skills, is_first_login)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', [
+                                   ('13800000001', '202300000001', '张三(测试队长)', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', '计算机学院', '软件工程', 'Python,Vue,后端', 0),
+                                   ('13800000002', '202300000002', '李四(测试队员)', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', '设计学院', '视觉传达', 'UI设计,Figma,画图', 0)
+                               ])
+
+            # 2. 插入一个初始的招募项目
+            cursor.execute('''INSERT INTO projects (title, leader_phone, description, tags, base_members, required_members, status)
+                              VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                           ('【创新创业大赛】寻一位靠谱的UI设计师', '13800000001', '项目已经有后端和前端，目前打算做一个校园二手交易平台参加省赛，缺一位能够设计原型图和UI界面的同学，欢迎带作品来聊！', 'UI设计,Figma', 2, 3, '招募中'))
+
+            # 获取刚刚插入的项目ID，用于绑定初始系统消息
+            new_proj_id = cursor.lastrowid
+
+            # 3. 插入对应的系统群聊创建消息
+            cursor.execute('''INSERT INTO messages (sender_phone, chat_type, target_id, content)
+                              VALUES (?, ?, ?, ?)''',
+                           ('system', 'group', str(new_proj_id), '【系统】项目队伍已创建成功！'))
+        # ==========================================
+
         conn.commit()
 
 
@@ -248,7 +282,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="校园组队系统 - 右侧边栏交互版", lifespan=lifespan)
+app = FastAPI(title="校园组队系统 - 优化防抖稳定版", lifespan=lifespan)
 
 
 # --- 3. 核心查询接口 ---
@@ -374,6 +408,8 @@ def get_dashboard_panels(user_data, search_q="", search_tag=""):
     for p in all_projects:
         total_current = p["base_members"] + p["approved_count"]
         is_full = total_current >= p["required_members"]
+
+        # 安全转义标题，防止恶意代码
         safe_title = html.escape(p["title"])
 
         if p['leader_phone'] == my_phone:
@@ -423,7 +459,8 @@ def get_dashboard_panels(user_data, search_q="", search_tag=""):
         if proj_members:
             avatars = "".join([
                                   f'''<div onclick="viewUserProfile('{m['phone']}')" title="{html.escape(m['name'])}" class="w-8 h-8 rounded-full bg-blue-500 border-2 border-white text-white flex items-center justify-center text-xs font-bold cursor-pointer hover:z-10 hover:scale-110 transition shadow-sm relative">{html.escape(m['name'])[0]}</div>'''
-                                  for m in proj_members])
+                                  for m
+                                  in proj_members])
             team_avatars_html = f'''<div class="mt-4 pt-3 border-t border-dashed flex items-center"><span class="text-xs text-gray-500 font-bold mr-3">已入组员:</span><div class="flex -space-x-2">{avatars}</div></div>'''
 
         safe_desc = html.escape(p["description"])
@@ -485,19 +522,10 @@ def alert_and_redirect(msg: str, url: str = "/"):
     return HTMLResponse(f"<script>alert('{msg}'); window.location.href='{url}';</script>")
 
 
-# 🌟 全局公共 JS (包含侧边栏抽屉逻辑)
 GLOBAL_JS = """
     let myPhone = '{myPhone}';
     let lastMsgId = localStorage.getItem(`lastMsgId_${myPhone}`) || 0;
-    let isLoggedOut = false;
-
-    // 🌟 控制侧边栏(右侧滑出)
-    window.toggleSidebar = function() {
-        let sb = document.getElementById('sidebar');
-        let ov = document.getElementById('sidebar-overlay');
-        if(sb) sb.classList.toggle('translate-x-full'); // translate-x-full = 隐藏在右侧
-        if(ov) ov.classList.toggle('hidden');
-    };
+    let isLoggedOut = false; // 防抖标志
 
     function viewUserProfile(phone) {
         fetch('/api/user/' + phone).then(res => res.json()).then(data => {
@@ -506,6 +534,7 @@ GLOBAL_JS = """
             if(data.name === data.student_id) { document.getElementById('view-name').innerText += " (默认昵称)"; }
             document.getElementById('view-edu').innerText = (data.college + ' ' + data.major + ' ' + data.class_name).trim() || '未填写教育信息';
             document.getElementById('view-skills').innerText = data.skills ? ('标签: ' + data.skills) : '暂未填写技能标签';
+
             let honNode = document.getElementById('view-honors');
             if(data.honors) { honNode.innerText = '🏆 荣誉: ' + data.honors; honNode.style.display = 'inline-block'; } 
             else { honNode.style.display = 'none'; }
@@ -625,7 +654,7 @@ GLOBAL_JS = """
 """
 
 
-# --- 4. 账号操作及页面路由 ---
+# --- 4. 账号操作路由 ---
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
     return """
@@ -713,12 +742,13 @@ async def do_login(username: str = Form(...), password: str = Form(...)):
         return alert_and_redirect("❌ 账号或密码错误！", "/login")
 
 
+# 🌟 修复遗漏的核心路由：内部验证并修改密码
 @app.post("/change_password")
 async def change_password(request: Request, student_id: str = Form(...), phone: str = Form(...),
                           old_password: str = Form(...), new_password: str = Form(...),
                           confirm_new_password: str = Form(...)):
     user = get_current_user(request)
-    if not user: return JSONResponse({"msg": "登录已过期，请刷新页面重新登录！"})
+    if not user: return JSONResponse({"msg": "登录已过期，请刷新页面！"})
     if new_password != confirm_new_password: return JSONResponse({"msg": "两次输入的新密码不一致！"})
     if user['phone'] != phone or user['student_id'] != student_id: return JSONResponse(
         {"msg": "填写的学号或手机号与当前登录账号不匹配，无法修改！"})
@@ -751,7 +781,6 @@ async def index(request: Request):
     user = get_current_user(request)
     if not user: return RedirectResponse(url="/login", status_code=303)
     my_phone, my_name = user['phone'], user['name']
-    student_id_val = user['student_id'] or ""
 
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
         if user['is_first_login']: conn.execute("UPDATE users SET is_first_login=0 WHERE phone=?",
@@ -782,32 +811,12 @@ async def index(request: Request):
     <body class="bg-slate-50 p-4 md:p-8 font-sans">
         <div id="toast-container" class="fixed bottom-5 right-5 z-50 w-80 flex flex-col justify-end pointer-events-none"></div>
 
-        <div id="sidebar-overlay" onclick="toggleSidebar()" class="fixed inset-0 bg-black bg-opacity-50 hidden z-40 transition-opacity"></div>
-        <div id="sidebar" class="fixed inset-y-0 right-0 w-64 bg-white shadow-2xl transform translate-x-full transition-transform duration-300 z-50 flex flex-col">
-            <div class="p-6 bg-indigo-600 flex flex-col items-center justify-center text-white relative">
-                <button onclick="toggleSidebar()" class="absolute top-2 left-3 text-white hover:text-gray-200 text-2xl font-bold">&times;</button>
-                <div class="w-16 h-16 bg-white text-indigo-600 rounded-full flex items-center justify-center font-black text-3xl mb-3 shadow-lg">{html.escape(my_name)[0]}</div>
-                <span class="font-bold text-lg truncate w-full text-center">{html.escape(my_name)}</span>
-                <span class="text-xs text-indigo-200 mt-1">{html.escape(student_id_val)}</span>
-            </div>
-            <div class="flex-1 p-4 space-y-2 overflow-y-auto">
-                <button onclick="toggleSidebar(); document.getElementById('profile-modal').classList.remove('hidden')" class="w-full text-left px-4 py-3 rounded-xl hover:bg-indigo-50 hover:text-indigo-600 text-gray-700 font-bold transition-colors flex items-center gap-3">👤 个人信息</button>
-                <button onclick="toggleSidebar(); document.getElementById('pwd-modal').classList.remove('hidden')" class="w-full text-left px-4 py-3 rounded-xl hover:bg-indigo-50 hover:text-indigo-600 text-gray-700 font-bold transition-colors flex items-center gap-3">🔒 修改密码</button>
-            </div>
-            <div class="p-4 border-t border-gray-100">
-                <a href="/logout" class="block w-full text-center px-4 py-3 bg-red-50 text-red-600 hover:bg-red-500 hover:text-white rounded-xl font-bold transition-colors shadow-sm">🚪 退出登录</a>
-            </div>
-        </div>
-
         <div class="max-w-6xl mx-auto space-y-6">
             <header class="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center relative overflow-hidden">
                 <div class="absolute top-0 left-0 w-2 h-full bg-indigo-500"></div>
+                <h1 class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600 ml-4 hidden md:block">🚀 校园组队平台</h1>
 
-                <div class="flex items-center gap-4 ml-4">
-                    <h1 class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600 hidden md:block">🚀 校园组队平台</h1>
-                </div>
-
-                <div class="flex items-center gap-2 bg-gray-50 p-2 pr-2 rounded-xl border border-gray-200 ml-auto flex-wrap justify-end">
+                <div class="flex items-center gap-2 bg-gray-50 p-2 pr-4 rounded-xl border border-gray-200 ml-auto flex-wrap justify-end">
                     <button onclick="document.getElementById('create-modal').classList.remove('hidden')" class="text-sm font-bold bg-indigo-50 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors">➕ 发布招募</button>
                     <button onclick="openModalAndMarkRead('audit-modal', 'audit')" class="relative text-sm font-bold bg-blue-50 text-blue-600 hover:bg-blue-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors">
                         🛡️ 队长审批<span id="audit-badge" class="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full {'hidden' if panels['audit_count'] == 0 else ''}">{panels['audit_count']}</span>
@@ -816,6 +825,7 @@ async def index(request: Request):
                         🙋‍♂️ 我的申请<span id="apply-badge" class="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full {'hidden' if panels['apply_count'] == 0 else ''}">{panels['apply_count']}</span>
                     </button>
                     <button onclick="document.getElementById('my-projects-modal').classList.remove('hidden')" class="text-sm font-bold bg-purple-50 text-purple-600 hover:bg-purple-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors">📝 我的招募</button>
+                    <button onclick="document.getElementById('profile-modal').classList.remove('hidden')" class="text-sm font-bold bg-gray-100 text-gray-600 hover:bg-gray-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors">👤 个人信息</button>
 
                     <a href="/chat" class="relative text-sm font-bold bg-gray-100 text-gray-600 hover:bg-gray-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors">
                         💬 消息<span id="msg-badge" class="absolute -top-1 -right-1 flex h-3 w-3 hidden"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-red-500 border border-white"></span></span>
@@ -823,7 +833,10 @@ async def index(request: Request):
 
                     <div class="w-px h-5 bg-gray-300 mx-2"></div>
 
-                    <div class="w-10 h-10 bg-indigo-500 rounded-full flex items-center justify-center text-white font-bold cursor-pointer hover:ring-4 ring-indigo-200 shadow-sm transition-all" onclick="toggleSidebar()">{html.escape(my_name)[0]}</div>
+                    <div class="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center text-white font-bold cursor-pointer hover:ring-4 ring-indigo-200 shadow-sm transition-all" onclick="document.getElementById('profile-modal').classList.remove('hidden')">{html.escape(my_name)[0]}</div>
+
+                    <button onclick="document.getElementById('pwd-modal').classList.remove('hidden')" class="text-sm font-bold text-gray-600 hover:bg-indigo-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors ml-2">修改密码</button>
+                    <a href="/logout" class="text-sm font-bold text-gray-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors ml-1">退出</a>
                 </div>
             </header>
 
@@ -939,7 +952,7 @@ async def index(request: Request):
                         <input type="password" id="cp2" name="confirm_new_password" placeholder="再次确认新密码" required class="w-full border p-2.5 rounded-lg outline-none text-sm pr-10 focus:ring-2 focus:ring-indigo-300">
                         <span id="ce2" onclick="toggleEye('cp2','ce2')" class="absolute right-3 top-2.5 cursor-pointer opacity-60 hover:opacity-100 transition text-lg">👁️</span>
                     </div>
-                    <button type="submit" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white transition-colors py-2.5 rounded-lg font-bold mt-2 shadow-sm">确认修改</button>
+                    <button type="submit" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white transition-colors py-2.5 rounded-lg font-bold mt-2">确认修改</button>
                 </form>
             </div>
         </div>
@@ -966,19 +979,240 @@ async def update_profile(request: Request, name: str = Form(...), college: str =
     return JSONResponse({"msg": "✅ 资料更新成功！"})
 
 
-@app.post("/update_profile")
-async def update_profile(request: Request, name: str = Form(...), college: str = Form(""), major: str = Form(""),
-                         class_name: str = Form(""), qq: str = Form(""), wechat: str = Form(""), bio: str = Form(""),
-                         skills: str = Form(""), honors: str = Form("")):
+# --- 6. 聊天与业务逻辑 (全部增加空 user 拦截防崩) ---
+@app.get("/api/chat_list")
+async def get_chat_list(request: Request):
     user = get_current_user(request)
-    if not user: return JSONResponse({"msg": "登录已过期，请刷新页面重新登录！"})
+    if not user: return JSONResponse([])
+    my_phone = user['phone']
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
-        conn.execute(
-            'UPDATE users SET name=?, college=?, major=?, class_name=?, qq=?, wechat=?, bio=?, skills=?, honors=? WHERE phone=?',
-            (name, college, major, class_name, qq, wechat, bio, skills, honors, user['phone']))
-        conn.commit()
-    return JSONResponse({"msg": "✅ 资料更新成功！"})
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('''SELECT id as target_id, title as name, 'group' as type
+                          FROM projects
+                          WHERE leader_phone = ?
+                            AND is_deleted = 0
+                          UNION
+                          SELECT p.id, p.title, 'group'
+                          FROM projects p
+                                   JOIN applications a ON p.id = a.proj_id
+                          WHERE a.applicant_phone = ?
+                            AND a.status = '已同意'
+                            AND p.is_deleted = 0''', (my_phone, my_phone))
+        groups = [dict(c) for c in cursor.fetchall()]
+        cursor.execute('''SELECT DISTINCT u.phone as target_id, u.name as name, 'private' as type
+                          FROM messages m
+                                   JOIN users u ON (u.phone = m.target_id AND m.sender_phone = ?) OR
+                                                   (u.phone = m.sender_phone AND m.target_id = ?)
+                          WHERE m.chat_type = 'private'
+                            AND u.phone != ?''', (my_phone, my_phone, my_phone))
+        privates = [dict(c) for c in cursor.fetchall()]
+        all_chats = groups + privates
+        for c in all_chats:
+            state = cursor.execute(
+                "SELECT last_read_msg_id, cleared_up_to_msg_id FROM chat_state WHERE phone=? AND chat_type=? AND target_id=?",
+                (my_phone, c['type'], c['target_id'])).fetchone()
+            last_read, cleared = state['last_read_msg_id'] if state else 0, state[
+                'cleared_up_to_msg_id'] if state else 0
+            if c['type'] == 'group':
+                c['unread'] = cursor.execute(
+                    "SELECT COUNT(*) FROM messages WHERE chat_type='group' AND target_id=? AND sender_phone!=? AND id>? AND id>?",
+                    (c['target_id'], my_phone, last_read, cleared)).fetchone()[0]
+            else:
+                c['unread'] = cursor.execute(
+                    "SELECT COUNT(*) FROM messages WHERE chat_type='private' AND sender_phone=? AND target_id=? AND id>? AND id>?",
+                    (c['target_id'], my_phone, last_read, cleared)).fetchone()[0]
+        return JSONResponse(all_chats)
 
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request, type: str = "none", id: str = ""):
+    user = get_current_user(request)
+    if not user: return RedirectResponse("/login", status_code=303)
+    my_phone = user['phone']
+    members_html = ""
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        if type == 'group' and id:
+            proj = cursor.execute("SELECT leader_phone FROM projects WHERE id = ?", (id,)).fetchone()
+            is_leader = (proj and str(proj['leader_phone']) == str(my_phone))
+            cursor.execute('''SELECT u.phone, u.name, '队长' as role
+                              FROM projects p
+                                       JOIN users u ON p.leader_phone = u.phone
+                              WHERE p.id = ?
+                              UNION
+                              SELECT u.phone, u.name, '队员' as role
+                              FROM applications a
+                                       JOIN users u ON a.applicant_phone = u.phone
+                              WHERE a.proj_id = ?
+                                AND a.status = '已同意' ''', (id, id))
+            for m in cursor.fetchall():
+                kick_btn = f'''<button onclick="kickMember({id}, '{m["phone"]}')" class="text-[10px] bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-600 hover:text-white transition-colors">移出</button>''' if is_leader and \
+                                                                                                                                                                                                                        m[
+                                                                                                                                                                                                                            'role'] != '队长' else ''
+                members_html += f'''<li class="flex justify-between items-center bg-gray-50 p-2 rounded mb-2"><div class="flex items-center gap-2 cursor-pointer hover:underline" onclick="viewUserProfile('{m["phone"]}')"><div class="w-6 h-6 bg-indigo-200 text-indigo-700 rounded-full flex items-center justify-center text-xs font-bold shadow-sm">{html.escape(m["name"])[0]}</div><span class="text-sm font-bold text-gray-800">{html.escape(m["name"])}</span> <span class="text-[10px] bg-gray-200 px-1 rounded text-gray-500">{m["role"]}</span></div>{kick_btn}</li>'''
+
+    html_template = f"""
+    <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>消息大厅</title><script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        let myPhone = '{my_phone}'; let chatType = '{type}', targetId = '{id}'; let lastMsgId = localStorage.getItem(`lastMsgId_${{myPhone}}`) || 0;
+        function viewUserProfile(phone) {{
+            fetch('/api/user/' + phone).then(res => res.json()).then(data => {{
+                document.getElementById('view-avatar').innerText = data.name[0];
+                document.getElementById('view-name').innerText = data.name;
+                document.getElementById('view-edu').innerText = (data.college + ' ' + data.major + ' ' + data.class_name).trim() || '未填写教育信息';
+                document.getElementById('view-skills').innerText = data.skills ? ('标签: ' + data.skills) : '暂未填写技能标签';
+                let honNode = document.getElementById('view-honors');
+                if(data.honors) {{ honNode.innerText = '🏆 荣誉: ' + data.honors; honNode.style.display = 'inline-block'; }} else {{ honNode.style.display = 'none'; }}
+                let chatBtn = document.getElementById('btn-start-chat');
+                if (phone === myPhone) {{ chatBtn.style.display = 'none'; }} else {{ chatBtn.style.display = 'block'; chatBtn.onclick = () => window.location.href = `/chat?type=private&id=${{phone}}`; }}
+                document.getElementById('view-profile-modal').classList.remove('hidden');
+            }});
+        }}
+        function formatChatTime(dateString) {{
+            let d = new Date(dateString.replace(' ', 'T') + 'Z'); let now = new Date();
+            let isSameYear = d.getFullYear() === now.getFullYear();
+            let isSameDay = isSameYear && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+            let yest = new Date(now); yest.setDate(now.getDate() - 1);
+            let isYest = d.getFullYear() === yest.getFullYear() && d.getMonth() === yest.getMonth() && d.getDate() === yest.getDate();
+            let timePart = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+            if (isSameDay) return '今天 ' + timePart; if (isYest) return '昨天 ' + timePart;
+            let md = (d.getMonth() + 1).toString().padStart(2, '0') + '-' + d.getDate().toString().padStart(2, '0');
+            if (isSameYear) return md + ' ' + timePart; return d.getFullYear() + '-' + md + ' ' + timePart;
+        }}
+        function loadChatList() {{
+            fetch('/api/chat_list').then(res => res.json()).then(chats => {{
+                if (chatType === 'private' && targetId && !chats.some(c => c.target_id == targetId)) chats.push({{target_id: targetId, name: '新会话', type: 'private', unread: 0}});
+                let html = '';
+                chats.forEach(c => {{
+                    let active = (c.target_id == targetId && c.type == chatType) ? 'bg-indigo-100 border-l-4 border-indigo-500' : 'hover:bg-gray-100 border-l-4 border-transparent';
+                    let icon = c.type === 'group' ? '👥' : '👤';
+                    let badge = c.unread > 0 ? `<span class="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-2">${{c.unread}}</span>` : '';
+                    let delBtn = `<button onclick="clearChat('${{c.type}}', '${{c.target_id}}'); event.preventDefault(); event.stopPropagation();" class="text-gray-400 hover:text-red-500 transition-colors ml-auto" title="清空记录">🗑️</button>`;
+                    html += `<a href="/chat?type=${{c.type}}&id=${{c.target_id}}" class="p-4 ${{active}} transition-all border-b flex items-center justify-between group"><div class="font-bold text-gray-800 flex items-center">${{icon}} ${{c.name}} ${{badge}}</div><div class="opacity-0 group-hover:opacity-100">${{delBtn}}</div></a>`;
+                }});
+                document.getElementById('chat-list').innerHTML = html || '<div class="p-4 text-gray-400 text-sm text-center">暂无对话</div>';
+            }});
+        }}
+        function loadMessages() {{
+            if (chatType === 'none') return;
+            fetch(`/api/messages?type=${{chatType}}&id=${{targetId}}`).then(res => res.json()).then(msgs => {{
+                let box = document.getElementById('msg-box'); let html = '';
+                msgs.forEach(m => {{
+                    let tStr = formatChatTime(m.created_at);
+                    if (m.sender_phone === 'system') {{ html += `<div class="text-center text-xs text-gray-400 my-4"><span class="bg-gray-100 px-3 py-1 rounded-full">${{tStr}} | 系统：${{m.content}}</span></div>`; }}
+                    else if (m.sender_phone === myPhone) {{ html += `<div class="flex justify-end mb-4"><div class="flex flex-col items-end"><span class="text-[10px] text-gray-400 mb-1 mr-12">${{tStr}}</span><div class="flex items-start gap-2"><div class="bg-indigo-500 text-white p-3 rounded-xl rounded-tr-sm shadow-sm max-w-[280px] break-words text-sm">${{m.content}}</div><div class="w-9 h-9 bg-indigo-200 text-indigo-700 rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0 cursor-pointer shadow-sm hover:ring-2 ring-indigo-300 transition" onclick="viewUserProfile('${{m.sender_phone}}')">${{m.sender_name[0]}}</div></div></div></div>`; }}
+                    else {{ html += `<div class="flex justify-start mb-4"><div class="flex flex-col items-start"><div class="flex items-center gap-2 mb-1 ml-12"><span class="text-xs text-gray-500 font-bold">${{m.sender_name}}</span><span class="text-[10px] text-gray-400">${{tStr}}</span></div><div class="flex items-start gap-2"><div class="w-9 h-9 bg-white text-indigo-700 rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0 cursor-pointer shadow-sm border hover:ring-2 ring-indigo-300 transition" onclick="viewUserProfile('${{m.sender_phone}}')">${{m.sender_name[0]}}</div><div class="bg-white border text-gray-800 p-3 rounded-xl rounded-tl-sm shadow-sm max-w-[280px] break-words text-sm">${{m.content}}</div></div></div></div>`; }}
+                }});
+                if (box.innerHTML !== html) {{ box.innerHTML = html; box.scrollTop = box.scrollHeight; }}
+            }});
+        }}
+        function sendMessage() {{
+            let input = document.getElementById('msg-input'), content = input.value.trim();
+            if (!content || chatType === 'none') return;
+            let fd = new FormData(); fd.append('type', chatType); fd.append('id', targetId); fd.append('content', content);
+            fetch('/api/send_message', {{ method: 'POST', body: fd }}).then(() => {{ input.value = ''; loadMessages(); loadChatList(); }});
+        }}
+        function kickMember(projId, phone) {{ if(confirm("确定移出该成员吗？")) {{ let fd = new FormData(); fd.append('proj_id', projId); fd.append('target_phone', phone); fetch('/api/kick_member', {{ method: 'POST', body: fd }}).then(() => window.location.reload()); }} }}
+        function clearChat(type, id) {{ if(confirm("确定清空此记录吗？(仅自己不可见)")) {{ let fd = new FormData(); fd.append('type', type); fd.append('id', id); fetch('/api/clear_chat', {{ method: 'POST', body: fd }}).then(() => {{ if (chatType === type && targetId === id) loadMessages(); loadChatList(); }}); }} }}
+        window.onload = () => {{ loadChatList(); loadMessages(); document.getElementById('msg-input')?.addEventListener('keypress', function (e) {{ if (e.key === 'Enter') sendMessage(); }}); setInterval(() => {{ loadChatList(); loadMessages(); }}, 2500); }};
+    </script>
+    </head>
+    <body class="bg-slate-100 h-screen flex flex-col font-sans overflow-hidden">
+        <header class="bg-indigo-600 text-white p-4 flex justify-between items-center shadow-md z-10"><h1 class="text-xl font-bold flex items-center gap-2"><a href="/" class="hover:text-indigo-200 transition-colors">⬅ 返回大厅</a> | 💬 消息控制台</h1><div class="text-sm font-bold bg-indigo-700 px-3 py-1 rounded-full cursor-pointer hover:bg-indigo-800 transition" onclick="viewUserProfile('{my_phone}')">{html.escape(user['name'])}</div></header>
+        <div class="flex flex-1 overflow-hidden">
+            <div class="w-1/4 bg-white border-r flex flex-col h-full overflow-y-auto"><div class="p-3 bg-gray-50 text-xs font-bold text-gray-500 tracking-wider">会话列表</div><div id="chat-list" class="flex-1 overflow-y-auto"></div></div>
+            <div class="w-2/4 bg-slate-50 flex flex-col relative">
+                {'''<div class="flex-1 flex items-center justify-center text-gray-400 font-bold">请在左侧选择聊天</div>''' if type == 'none' else f'''
+                <div class="bg-white border-b p-3 flex justify-between items-center shadow-sm z-10"><span class="font-bold text-gray-700 text-sm">当前会话</span><button onclick="clearChat('{type}', '{id}')" class="text-xs text-gray-400 hover:text-red-500 font-bold transition-colors flex items-center gap-1">🗑️ 清空记录</button></div>
+                <div id="msg-box" class="flex-1 overflow-y-auto p-6 scroll-smooth"></div><div class="p-4 bg-white border-t flex gap-2"><input type="text" id="msg-input" placeholder="输入消息 (Enter 发送)..." class="flex-1 bg-gray-100 border-none rounded-xl px-4 py-3 outline-none focus:ring-2 ring-indigo-500"><button onclick="sendMessage()" class="bg-indigo-100 text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors px-6 rounded-xl font-bold">发送</button></div>'''}
+            </div>
+            {f'''<div class="w-1/4 bg-white border-l p-4 flex flex-col"><h3 class="font-bold text-gray-800 border-b pb-2 mb-4">👥 成员面板</h3><ul class="flex-1 overflow-y-auto m-0 p-0">{members_html}</ul></div>''' if type == 'group' else '<div class="w-1/4 bg-white border-l bg-gray-50 flex items-center justify-center text-gray-300">私聊模式下无侧边栏</div>'}
+        </div>
+        <div id="view-profile-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"><div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-sm text-center relative overflow-hidden"><button onclick="document.getElementById('view-profile-modal').classList.add('hidden')" class="absolute top-3 right-4 text-gray-400 hover:text-gray-800 transition-colors font-bold text-2xl z-10">&times;</button><div class="w-20 h-20 bg-indigo-500 rounded-full flex items-center justify-center mx-auto shadow-lg mb-4 mt-4 text-white text-4xl font-black cursor-pointer hover:ring-4 ring-indigo-200 transition-all" id="view-avatar">?</div><h2 class="text-2xl font-black text-gray-800 mb-1" id="view-name">加载中...</h2><p class="text-sm text-gray-500 font-bold mb-2" id="view-edu"></p><p class="text-xs text-blue-600 bg-blue-50 inline-block px-3 py-1 rounded-full mb-2 font-bold" id="view-skills"></p><br><p class="text-xs text-orange-600 bg-orange-50 inline-block px-3 py-1 rounded-full mb-6 font-bold" id="view-honors"></p><button id="btn-start-chat" class="w-full bg-indigo-100 text-indigo-700 hover:bg-indigo-600 hover:text-white transition-colors font-bold py-3 rounded-xl shadow-md mb-2">💬 发起聊天</button></div></div>
+    </body></html>
+    """
+    return HTMLResponse(content=html_template)
+
+
+@app.get("/api/messages")
+async def get_messages(request: Request, type: str, id: str):
+    user = get_current_user(request)
+    if not user: return JSONResponse([])
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        state = cursor.execute(
+            "SELECT cleared_up_to_msg_id FROM chat_state WHERE phone=? AND chat_type=? AND target_id=?",
+            (user['phone'], type, id)).fetchone()
+        cleared_id = state['cleared_up_to_msg_id'] if state else 0
+        if type == 'group':
+            msgs = cursor.execute(
+                "SELECT m.*, u.name as sender_name FROM messages m LEFT JOIN users u ON m.sender_phone = u.phone WHERE chat_type = 'group' AND target_id = ? AND m.id > ? ORDER BY created_at ASC",
+                (id, cleared_id)).fetchall()
+        else:
+            msgs = cursor.execute(
+                "SELECT m.*, u.name as sender_name FROM messages m LEFT JOIN users u ON m.sender_phone = u.phone WHERE chat_type = 'private' AND ((sender_phone = ? AND target_id = ?) OR (sender_phone = ? AND target_id = ?)) AND m.id > ? ORDER BY created_at ASC",
+                (user['phone'], id, id, user['phone'], cleared_id)).fetchall()
+        if msgs:
+            max_id = msgs[-1]['id']
+            exists = cursor.execute("SELECT 1 FROM chat_state WHERE phone=? AND chat_type=? AND target_id=?",
+                                    (user['phone'], type, id)).fetchone()
+            if exists:
+                cursor.execute("UPDATE chat_state SET last_read_msg_id=? WHERE phone=? AND chat_type=? AND target_id=?",
+                               (max_id, user['phone'], type, id))
+            else:
+                cursor.execute(
+                    "INSERT INTO chat_state (phone, chat_type, target_id, last_read_msg_id) VALUES (?, ?, ?, ?)",
+                    (user['phone'], type, id, max_id))
+            conn.commit()
+
+        # 安全转义处理
+        res = []
+        for m in msgs:
+            d = dict(m)
+            if d['sender_phone'] != 'system':
+                d['content'] = html.escape(d['content'])
+                d['sender_name'] = html.escape(d['sender_name'])
+            res.append(d)
+        return JSONResponse(res)
+
+
+@app.post("/api/send_message")
+async def send_message(request: Request, type: str = Form(...), id: str = Form(...), content: str = Form(...)):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"msg": "登录已过期，请刷新！"})
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.execute("INSERT INTO messages (sender_phone, chat_type, target_id, content) VALUES (?, ?, ?, ?)",
+                     (user['phone'], type, id, content))
+        conn.commit()
+    return JSONResponse({"msg": "发送成功"})
+
+
+@app.post("/api/clear_chat")
+async def clear_chat(request: Request, type: str = Form(...), id: str = Form(...)):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"msg": "登录已过期！"})
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        cursor = conn.cursor()
+        max_id = \
+        cursor.execute("SELECT MAX(id) FROM messages WHERE chat_type='group' AND target_id=?", (id,)).fetchone()[
+            0] or 0 if type == 'group' else cursor.execute(
+            "SELECT MAX(id) FROM messages WHERE chat_type='private' AND ((sender_phone=? AND target_id=?) OR (sender_phone=? AND target_id=?))",
+            (user['phone'], id, id, user['phone'])).fetchone()[0] or 0
+        exists = cursor.execute("SELECT 1 FROM chat_state WHERE phone=? AND chat_type=? AND target_id=?",
+                                (user['phone'], type, id)).fetchone()
+        if exists:
+            cursor.execute(
+                "UPDATE chat_state SET cleared_up_to_msg_id=?, last_read_msg_id=? WHERE phone=? AND chat_type=? AND target_id=?",
+                (max_id, max_id, user['phone'], type, id))
+        else:
+            cursor.execute(
+                "INSERT INTO chat_state (phone, chat_type, target_id, cleared_up_to_msg_id, last_read_msg_id) VALUES (?, ?, ?, ?, ?)",
+                (user['phone'], type, id, max_id, max_id))
+        conn.commit()
+    return JSONResponse({"status": "cleared"})
 
 
 @app.post("/toggle_hide")
@@ -1002,7 +1236,52 @@ async def delete_project(request: Request, proj_id: int = Form(...)):
     return JSONResponse({"msg": "🗑️ 项目已永久删除"})
 
 
+@app.post("/hide_record")
+async def hide_record(request: Request, app_id: int = Form(...), role: str = Form(...)):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"msg": "登录已过期！"})
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        if role == 'applicant':
+            conn.execute("UPDATE applications SET applicant_visible=0 WHERE id=? AND applicant_phone=?",
+                         (app_id, user['phone']))
+        else:
+            conn.execute("UPDATE applications SET leader_visible=0 WHERE id=?", (app_id,))
+        conn.commit()
+    return JSONResponse({"msg": "🗑️ 记录已移除"})
 
+
+@app.post("/api/kick_member")
+async def kick_member(request: Request, proj_id: int = Form(...), target_phone: str = Form(...)):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"msg": "登录已过期！"})
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        cursor = conn.cursor()
+        t_name = cursor.execute("SELECT name FROM users WHERE phone = ?", (target_phone,)).fetchone()[0]
+        cursor.execute(
+            "UPDATE applications SET status='已移出', applicant_read=0 WHERE proj_id=? AND applicant_phone=?",
+            (proj_id, target_phone))
+        cursor.execute(
+            "INSERT INTO messages (sender_phone, chat_type, target_id, content) VALUES ('system', 'group', ?, ?)",
+            (proj_id, f"管理操作：队长已将 【{t_name}】 移出队伍。"))
+        conn.commit()
+    return JSONResponse({"msg": "成功移出该成员"})
+
+
+@app.post("/create")
+async def create_project(request: Request, title: str = Form(...), description: str = Form(...), tags: str = Form(...),
+                         base_members: int = Form(...), required_members: int = Form(...)):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"msg": "登录已过期，请刷新！"})
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO projects (title, leader_phone, description, tags, base_members, required_members) VALUES (?, ?, ?, ?, ?, ?)",
+            (title, user['phone'], description, tags, base_members, required_members))
+        cursor.execute(
+            "INSERT INTO messages (sender_phone, chat_type, target_id, content) VALUES ('system', 'group', ?, ?)",
+            (cursor.lastrowid, "【系统】项目队伍已创建成功！"))
+        conn.commit()
+    return JSONResponse({"msg": "🎉 发布成功！"})
 
 
 @app.post("/apply")
@@ -1040,6 +1319,29 @@ async def cancel_apply(request: Request, app_id: int = Form(...)):
     return JSONResponse({"msg": "🗑️ 申请已撤销"})
 
 
+@app.post("/audit")
+async def audit_application(request: Request, app_id: int = Form(...), proj_id: int = Form(...),
+                            applicant_name: str = Form(...), action: str = Form(...)):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"msg": "登录已过期，请刷新！"})
+    new_status = "已同意" if action == "accept" else "已拒绝"
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("UPDATE applications SET status=?, applicant_read=0 WHERE id=?", (new_status, app_id))
+        if action == "accept":
+            cursor.execute(
+                "INSERT INTO messages (sender_phone, chat_type, target_id, content) VALUES ('system', 'group', ?, ?)",
+                (proj_id, f"🎉 欢迎新成员 【{applicant_name}】 加入队伍！"))
+            proj = cursor.execute("SELECT base_members, required_members FROM projects WHERE id = ?",
+                                  (proj_id,)).fetchone()
+            app_cnt = cursor.execute("SELECT COUNT(*) FROM applications WHERE proj_id=? AND status='已同意'",
+                                     (proj_id,)).fetchone()[0]
+            if proj['base_members'] + app_cnt >= proj['required_members']: cursor.execute(
+                "UPDATE projects SET status='已截止', is_hidden=1 WHERE id=?", (proj_id,))
+        conn.commit()
+    return JSONResponse({"msg": f"审批成功！结果为：{new_status}"})
+
 
 @app.post("/toggle_status")
 async def toggle_status(request: Request, proj_id: int = Form(...)):
@@ -1056,6 +1358,6 @@ async def toggle_status(request: Request, proj_id: int = Form(...)):
 if __name__ == "__main__":
     print("===================================================")
     print("🚀 校园组队系统启动成功！")
-    print("🌐 访问地址: http://127.0.0.1:8000")
+    print("🌐 访问地址: http://127.0.0.1:8002")
     print("===================================================")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8002, log_level="warning")
