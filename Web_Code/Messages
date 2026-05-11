@@ -1,0 +1,99 @@
+<!-- 消息通知全局 JS 核心（来自 GLOBAL_JS） -->
+<script>
+    let myPhone = '{myPhone}';
+    let lastMsgId = localStorage.getItem(`lastMsgId_${myPhone}`) || 0;
+    let isLoggedOut = false; // 防抖标志
+
+    function showToast(sender, content, type) {
+        let container = document.getElementById('toast-container');
+        let toast = document.createElement('div');
+        toast.className = 'bg-white p-4 rounded-xl shadow-2xl border-l-4 border-indigo-500 mb-3 transform transition-all duration-300 translate-x-full';
+        toast.innerHTML = `<div class="font-bold text-sm text-gray-800">${sender}</div><div class="text-xs text-gray-600 mt-1">${content}</div>`;
+        container.appendChild(toast);
+        setTimeout(() => toast.classList.remove('translate-x-full'), 50);
+        setTimeout(() => { toast.classList.add('opacity-0'); setTimeout(() => toast.remove(), 300); }, 3500);
+    }
+
+    setInterval(() => {
+        if(isLoggedOut) return;
+        fetch('/api/check_session').then(res => res.json()).then(data => {
+            if (data.status === 'logged_out') { 
+                isLoggedOut = true;
+                document.cookie = 'session_token=; Max-Age=0; path=/'; 
+                alert('🚨 登录已过期或在别处登录，请重新登录！');
+                window.location.href = '/login'; 
+            }
+        });
+        fetch(`/api/poll_new?since_id=${lastMsgId}`).then(res => res.json()).then(msgs => {
+            if (msgs.length > 0) {
+                let maxId = parseInt(lastMsgId);
+                msgs.forEach(m => {
+                    if (m.id > maxId) maxId = m.id;
+                    let isWatchingCurrent = window.location.href.includes(`/chat?type=${m.chat_type}&id=${m.chat_type === 'group' ? m.target_id : m.sender_phone}`);
+                    if(!isWatchingCurrent) {
+                        showToast(m.sender_name || '系统', m.content, m.chat_type);
+                        let badge = document.getElementById('msg-badge'); if(badge) badge.classList.remove('hidden');
+                    }
+                });
+                lastMsgId = maxId; localStorage.setItem(`lastMsgId_${myPhone}`, lastMsgId);
+                if(typeof loadMessages === "function") loadMessages();
+                if(typeof loadChatList === "function") loadChatList();
+            }
+        });
+        if (window.location.pathname === '/') refreshDashboard();
+    }, 2500);
+</script>
+
+<!-- 消息页面专用通知/聊天 JS（来自 /chat 页面） -->
+<script>
+    let myPhone = '{myPhone}'; let chatType = '{type}', targetId = '{id}'; let lastMsgId = localStorage.getItem(`lastMsgId_${myPhone}`) || 0;
+    
+    function loadChatList() {
+        fetch('/api/chat_list').then(res => res.json()).then(chats => {
+            if (chatType === 'private' && targetId && !chats.some(c => c.target_id == targetId)) chats.push({target_id: targetId, name: '新会话', type: 'private', unread: 0});
+            let html = '';
+            chats.forEach(c => {
+                let active = (c.target_id == targetId && c.type == chatType) ? 'bg-indigo-100 border-l-4 border-indigo-500' : 'hover:bg-gray-100 border-l-4 border-transparent';
+                let icon = c.type === 'group' ? '👥' : '👤';
+                let badge = c.unread > 0 ? `<span class="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-2">${c.unread}</span>` : '';
+                let delBtn = `<button onclick="clearChat('${c.type}', '${c.target_id}'); event.preventDefault(); event.stopPropagation();" class="text-gray-400 hover:text-red-500 transition-colors ml-auto" title="清空记录">🗑️</button>`;
+                html += `<a href="/chat?type=${c.type}&id=${c.target_id}" class="p-4 ${active} transition-all border-b flex items-center justify-between group"><div class="font-bold text-gray-800 flex items-center">${icon} ${c.name} ${badge}</div><div class="opacity-0 group-hover:opacity-100">${delBtn}</div></a>`;
+            });
+            document.getElementById('chat-list').innerHTML = html || '<div class="p-4 text-gray-400 text-sm text-center">暂无对话</div>';
+        });
+    }
+    function loadMessages() {
+        if (chatType === 'none') return;
+        fetch(`/api/messages?type=${chatType}&id=${targetId}`).then(res => res.json()).then(msgs => {
+            let box = document.getElementById('msg-box'); let html = '';
+            msgs.forEach(m => {
+                let tStr = formatChatTime(m.created_at);
+                if (m.sender_phone === 'system') { html += `<div class="text-center text-xs text-gray-400 my-4"><span class="bg-gray-100 px-3 py-1 rounded-full">${tStr} | 系统：${m.content}</span></div>`; }
+                else if (m.sender_phone === myPhone) { html += `<div class="flex justify-end mb-4"><div class="flex flex-col items-end"><span class="text-[10px] text-gray-400 mb-1 mr-12">${tStr}</span><div class="flex items-start gap-2"><div class="bg-indigo-500 text-white p-3 rounded-xl rounded-tr-sm shadow-sm max-w-[280px] break-words text-sm">${m.content}</div><div class="w-9 h-9 bg-indigo-200 text-indigo-700 rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0 cursor-pointer shadow-sm hover:ring-2 ring-indigo-300 transition" onclick="viewUserProfile('${m.sender_phone}')">${m.sender_name[0]}</div></div></div></div>`; }
+                else { html += `<div class="flex justify-start mb-4"><div class="flex flex-col items-start"><div class="flex items-center gap-2 mb-1 ml-12"><span class="text-xs text-gray-500 font-bold">${m.sender_name}</span><span class="text-[10px] text-gray-400">${tStr}</span></div><div class="flex items-start gap-2"><div class="w-9 h-9 bg-white text-indigo-700 rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0 cursor-pointer shadow-sm border hover:ring-2 ring-indigo-300 transition" onclick="viewUserProfile('${m.sender_phone}')">${m.sender_name[0]}</div><div class="bg-white border text-gray-800 p-3 rounded-xl rounded-tl-sm shadow-sm max-w-[280px] break-words text-sm">${m.content}</div></div></div></div>`; }
+            });
+            if (box.innerHTML !== html) { box.innerHTML = html; box.scrollTop = box.scrollHeight; }
+        });
+    }
+    function sendMessage() {
+        let input = document.getElementById('msg-input'), content = input.value.trim();
+        if (!content || chatType === 'none') return;
+        let fd = new FormData(); fd.append('type', chatType); fd.append('id', targetId); fd.append('content', content);
+        fetch('/api/send_message', { method: 'POST', body: fd }).then(() => { input.value = ''; loadMessages(); loadChatList(); });
+    }
+    function kickMember(projId, phone) { if(confirm("确定移出该成员吗？")) { let fd = new FormData(); fd.append('proj_id', projId); fd.append('target_phone', phone); fetch('/api/kick_member', { method: 'POST', body: fd }).then(() => window.location.reload()); } }
+    function clearChat(type, id) { if(confirm("确定清空此记录吗？(仅自己不可见)")) { let fd = new FormData(); fd.append('type', type); fd.append('id', id); fetch('/api/clear_chat', { method: 'POST', body: fd }).then(() => { if (chatType === type && targetId === id) loadMessages(); loadChatList(); }); } }
+    window.onload = () => { loadChatList(); loadMessages(); document.getElementById('msg-input')?.addEventListener('keypress', function (e) { if (e.key === 'Enter') sendMessage(); }); setInterval(() => { loadChatList(); loadMessages(); }, 2500); };
+</script>
+
+<!-- 消息未读红点 HTML（来自主页面） -->
+<a href="/chat" class="relative text-sm font-bold bg-gray-100 text-gray-600 hover:bg-gray-500 hover:text-white px-3 py-1.5 rounded-lg transition-colors">
+    💬 消息
+    <span id="msg-badge" class="absolute -top-1 -right-1 flex h-3 w-3 hidden">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-3 w-3 bg-red-500 border border-white"></span>
+    </span>
+</a>
+
+<!-- 消息 toast 容器 -->
+<div id="toast-container" class="fixed bottom-5 right-5 z-50 w-80 flex flex-col justify-end pointer-events-none"></div>
