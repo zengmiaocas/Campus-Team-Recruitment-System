@@ -86,6 +86,10 @@ def init_db():
             cursor.execute("ALTER TABLE users ADD COLUMN student_id TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN last_seen_proj_id INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
         cursor.execute("CREATE TABLE IF NOT EXISTS user_sessions (session_id TEXT PRIMARY KEY, phone TEXT UNIQUE)")
         cursor.execute('''CREATE TABLE IF NOT EXISTS projects
@@ -255,14 +259,20 @@ def init_db():
             cursor.executemany(
                 '''INSERT INTO users (phone, student_id, name, password, college, major, skills, is_first_login)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', [
-                                   ('13800000001', '202300000001', '张三(测试队长)', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', '计算机学院', '软件工程', 'Python,Vue,后端', 0),
-                                   ('13800000002', '202300000002', '李四(测试队员)', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', '设计学院', '视觉传达', 'UI设计,Figma,画图', 0)
-                               ])
+                    ('13800000001', '202300000001', '张三(测试队长)',
+                     '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', '计算机学院', '软件工程',
+                     'Python,Vue,后端', 0),
+                    ('13800000002', '202300000002', '李四(测试队员)',
+                     '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', '设计学院', '视觉传达',
+                     'UI设计,Figma,画图', 0)
+                ])
 
             # 2. 插入一个初始的招募项目
-            cursor.execute('''INSERT INTO projects (title, leader_phone, description, tags, base_members, required_members, status)
-                              VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                           ('【创新创业大赛】寻一位靠谱的UI设计师', '13800000001', '项目已经有后端和前端，目前打算做一个校园二手交易平台参加省赛，缺一位能够设计原型图和UI界面的同学，欢迎带作品来聊！', 'UI设计,Figma', 2, 3, '招募中'))
+            cursor.execute(
+                '''INSERT INTO projects (title, leader_phone, description, tags, base_members, required_members, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                ('【创新创业大赛】寻一位靠谱的UI设计师', '13800000001', '项目已经有后端和前端，目前打算做一个校园二手交易平台参加省赛，缺一位能够设计原型图和UI界面的同学，欢迎带作品来聊！',
+                 'UI设计,Figma', 2, 3, '招募中'))
 
             # 获取刚刚插入的项目ID，用于绑定初始系统消息
             new_proj_id = cursor.lastrowid
@@ -282,7 +292,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="校园组队系统 - 优化防抖稳定版", lifespan=lifespan)
+app = FastAPI(title="校园组队系统", lifespan=lifespan)
 
 
 # --- 3. 核心查询接口 ---
@@ -339,9 +349,58 @@ async def poll_new(request: Request, since_id: int = 0):
         return JSONResponse([dict(m) for m in msgs])
 
 
+# 🌟 修改：轮询推荐项目接口 (包含模糊匹配逻辑)
+@app.get("/api/poll_recommend")
+async def poll_recommend(request: Request):
+    user = get_current_user(request)
+    if not user: return JSONResponse({"items": []})
+
+    my_phone = user['phone']
+    # 优化：提取技能列表并转小写
+    my_skills = [s.strip().lower() for s in (user['skills'] or '').split(',') if s.strip()]
+
+    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        last_seen = user['last_seen_proj_id'] or 0
+        current_max_id = cursor.execute("SELECT MAX(id) FROM projects").fetchone()[0] or 0
+
+        # 如果没填技能或首次登录，直接同步游标
+        if last_seen == 0 or not my_skills:
+            cursor.execute("UPDATE users SET last_seen_proj_id = ? WHERE phone = ?", (current_max_id, my_phone))
+            conn.commit()
+            return JSONResponse({"items": []})
+
+        # 查找新发布的公开招募项目
+        new_projects = cursor.execute('''
+                                      SELECT id, title, tags
+                                      FROM projects
+                                      WHERE id > ? AND leader_phone != ? AND status = '招募中' AND is_deleted = 0 AND is_hidden = 0
+                                      ORDER BY id ASC
+                                      ''', (last_seen, my_phone)).fetchall()
+
+        recommended_items = []
+        max_id = last_seen
+
+        for p in new_projects:
+            max_id = max(max_id, p['id'])
+            proj_tags_str = (p['tags'] or '').lower()
+            # 💡 只要包含就推荐
+            if any(skill in proj_tags_str for skill in my_skills):
+                recommended_items.append({"id": p['id'], "title": p['title']})
+
+        if max_id > last_seen:
+            cursor.execute("UPDATE users SET last_seen_proj_id = ? WHERE phone = ?", (max_id, my_phone))
+            conn.commit()
+
+        return JSONResponse({"items": recommended_items})
+
+
 def get_dashboard_panels(user_data, search_q="", search_tag=""):
     my_phone = user_data['phone']
-    my_skills_set = set([s.strip() for s in (user_data['skills'] or '').split(',') if s.strip()])
+    # 优化：提取技能列表并转小写
+    my_skills = [s.strip().lower() for s in (user_data['skills'] or '').split(',') if s.strip()]
 
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
         conn.row_factory = sqlite3.Row
@@ -409,7 +468,6 @@ def get_dashboard_panels(user_data, search_q="", search_tag=""):
         total_current = p["base_members"] + p["approved_count"]
         is_full = total_current >= p["required_members"]
 
-        # 安全转义标题，防止恶意代码
         safe_title = html.escape(p["title"])
 
         if p['leader_phone'] == my_phone:
@@ -458,30 +516,31 @@ def get_dashboard_panels(user_data, search_q="", search_tag=""):
         proj_members = members_by_proj.get(p['id'], [])
         if proj_members:
             avatars = "".join([
-                                  f'''<div onclick="viewUserProfile('{m['phone']}')" title="{html.escape(m['name'])}" class="w-8 h-8 rounded-full bg-blue-500 border-2 border-white text-white flex items-center justify-center text-xs font-bold cursor-pointer hover:z-10 hover:scale-110 transition shadow-sm relative">{html.escape(m['name'])[0]}</div>'''
-                                  for m
-                                  in proj_members])
+                f'''<div onclick="viewUserProfile('{m['phone']}')" title="{html.escape(m['name'])}" class="w-8 h-8 rounded-full bg-blue-500 border-2 border-white text-white flex items-center justify-center text-xs font-bold cursor-pointer hover:z-10 hover:scale-110 transition shadow-sm relative">{html.escape(m['name'])[0]}</div>'''
+                for m
+                in proj_members])
             team_avatars_html = f'''<div class="mt-4 pt-3 border-t border-dashed flex items-center"><span class="text-xs text-gray-500 font-bold mr-3">已入组员:</span><div class="flex -space-x-2">{avatars}</div></div>'''
 
         safe_desc = html.escape(p["description"])
         projects_html += f'''<div class="bg-white p-5 rounded-xl shadow-sm border border-gray-100 mb-5 relative group"><div class="flex justify-between items-center mb-3"><h3 class="text-xl font-extrabold text-gray-800">{safe_title}</h3><div>{status_badge}</div></div><div class="flex flex-wrap items-center gap-3 text-xs mb-3"><div class="flex items-center gap-1.5 bg-gray-100 hover:bg-indigo-100 px-2 py-1 rounded cursor-pointer transition" onclick="viewUserProfile('{p["leader_phone"]}')"><div class="w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-sm">{html.escape(p["leader_name"])[0]}</div><span class="text-gray-700 font-bold">队长: {html.escape(p["leader_name"])}</span></div><span class="bg-orange-50 text-orange-600 px-2 py-1 rounded font-bold">进度: {total_current} / {p["required_members"]} 人</span><span class="bg-blue-50 text-blue-600 px-2 py-1 rounded">标签: {html.escape(p["tags"])}</span></div><div class="prose max-w-none text-sm text-gray-700 bg-gray-50 p-4 rounded-lg border border-gray-100 mb-4 markdown-content" data-md="{safe_desc}">正在渲染...</div><div class="flex justify-end">{action_btn}</div>{team_avatars_html}</div>'''
 
         if p['leader_phone'] != my_phone and p['status'] == '招募中' and not is_full:
-            proj_tags = set([t.strip() for t in p['tags'].split(',') if t.strip()])
-            score = len(my_skills_set.intersection(proj_tags))
+            # 💡 优化权重计算：包含就给分
+            proj_tags_str = (p['tags'] or '').lower()
+            score = sum(1 for skill in my_skills if skill in proj_tags_str)
             if score > 0: scored_projects.append((score, p))
 
     scored_projects.sort(key=lambda x: x[0], reverse=True)
     for score, p in scored_projects[:5]:
-        recommend_html += f'''<div class="p-2 border-b text-sm"><span class="font-bold text-indigo-600">🔥 {html.escape(p['title'])}</span><div class="text-xs text-gray-500 mt-1">匹配度: {score}个标签吻合</div></div>'''
+        recommend_html += f'''<div class="p-2 border-b text-sm"><span class="font-bold text-indigo-600">🔥 {html.escape(p['title'])}</span><div class="text-xs text-gray-500 mt-1">匹配权重: {score}个标签关联</div></div>'''
 
     my_apps_html = "".join([
-                               f'''<li class="flex justify-between items-center border-b border-gray-100 pb-3 mb-3 text-sm"><div class="flex flex-col"><span class="font-bold text-gray-700">{html.escape(a["title"])}</span><span class="text-xs font-bold {"text-yellow-600" if a["status"] == "待审核" else "text-green-600" if a["status"] == "已同意" else "text-red-500"} mt-1">状态: {a["status"]}</span></div><div>{f'<form action="/cancel_apply" method="post" class="inline m-0 ajax-form"><input type="hidden" name="app_id" value="{a["app_id"]}"><button type="submit" class="text-xs bg-orange-100 hover:bg-orange-600 hover:text-white text-orange-700 font-bold px-3 py-1.5 rounded-lg transition-colors">撤销申请</button></form>' if a["status"] == "待审核" else f'<form action="/hide_record" method="post" class="inline m-0 ajax-form"><input type="hidden" name="app_id" value="{a["app_id"]}"><input type="hidden" name="role" value="applicant"><button type="submit" class="text-xs bg-red-100 hover:bg-red-600 hover:text-white text-red-600 font-bold px-3 py-1.5 rounded-lg transition-colors">删除记录</button></form>'}{f'<a href="/chat?type=group&id={a["proj_id"]}" class="text-xs bg-indigo-100 hover:bg-indigo-600 hover:text-white text-indigo-700 font-bold px-3 py-1.5 rounded-lg ml-2 transition-colors">进群聊</a>' if a["status"] == "已同意" else ""}</div></li>'''
-                               for a in my_apps])
+        f'''<li class="flex justify-between items-center border-b border-gray-100 pb-3 mb-3 text-sm"><div class="flex flex-col"><span class="font-bold text-gray-700">{html.escape(a["title"])}</span><span class="text-xs font-bold {"text-yellow-600" if a["status"] == "待审核" else "text-green-600" if a["status"] == "已同意" else "text-red-500"} mt-1">状态: {a["status"]}</span></div><div>{f'<form action="/cancel_apply" method="post" class="inline m-0 ajax-form"><input type="hidden" name="app_id" value="{a["app_id"]}"><button type="submit" class="text-xs bg-orange-100 hover:bg-orange-600 hover:text-white text-orange-700 font-bold px-3 py-1.5 rounded-lg transition-colors">撤销申请</button></form>' if a["status"] == "待审核" else f'<form action="/hide_record" method="post" class="inline m-0 ajax-form"><input type="hidden" name="app_id" value="{a["app_id"]}"><input type="hidden" name="role" value="applicant"><button type="submit" class="text-xs bg-red-100 hover:bg-red-600 hover:text-white text-red-600 font-bold px-3 py-1.5 rounded-lg transition-colors">删除记录</button></form>'}{f'<a href="/chat?type=group&id={a["proj_id"]}" class="text-xs bg-indigo-100 hover:bg-indigo-600 hover:text-white text-indigo-700 font-bold px-3 py-1.5 rounded-lg ml-2 transition-colors">进群聊</a>' if a["status"] == "已同意" else ""}</div></li>'''
+        for a in my_apps])
 
     audits_html = "".join([
-                              f'''<li class="bg-yellow-50 p-3 rounded-lg border border-yellow-200 mb-3 text-sm"><div class="flex items-center gap-2 mb-2 text-yellow-900 cursor-pointer hover:underline" onclick="viewUserProfile('{a["applicant_phone"]}')"><div class="w-6 h-6 bg-yellow-500 rounded-full flex items-center justify-center text-white font-bold text-xs">{html.escape(a["applicant_name"])[0]}</div><strong class="text-lg">{html.escape(a["applicant_name"])}</strong></div><span class="text-xs opacity-75 block mb-1">申请: 《{html.escape(a["title"])}》</span>{f'<div class="text-[10px] text-orange-600 bg-orange-100 px-2 py-0.5 rounded-full inline-block mb-2 font-bold truncate max-w-full" title="{html.escape(a["applicant_honors"])}">🏆 荣誉: {html.escape(a["applicant_honors"])}</div>' if a["applicant_honors"] else ''}{f'<div class="flex gap-2 m-0 mt-1"><button type="button" onclick="submitAudit({a["app_id"]}, {a["proj_id"]}, \'{html.escape(a["applicant_name"])}\', \'accept\')" class="w-1/2 bg-green-100 hover:bg-green-600 hover:text-white text-green-700 transition-colors py-2 rounded-lg text-sm font-bold shadow-sm">同意进组</button><button type="button" onclick="submitAudit({a["app_id"]}, {a["proj_id"]}, \'{html.escape(a["applicant_name"])}\', \'reject\')" class="w-1/2 bg-red-100 hover:bg-red-600 hover:text-white text-red-600 transition-colors py-2 rounded-lg text-sm font-bold shadow-sm">婉拒</button></div>' if a["status"] == "待审核" else f'<div class="mt-2 flex justify-between items-center"><span class="text-xs font-bold text-gray-500">已处理 ({a["status"]})</span><form action="/hide_record" method="post" class="m-0 ajax-form"><input type="hidden" name="app_id" value="{a["app_id"]}"><input type="hidden" name="role" value="leader"><button type="submit" class="text-xs bg-gray-200 hover:bg-red-500 hover:text-white transition-colors px-2 py-1 rounded font-bold text-gray-600">删除记录</button></form></div>'}</li>'''
-                              for a in audits])
+        f'''<li class="bg-yellow-50 p-3 rounded-lg border border-yellow-200 mb-3 text-sm"><div class="flex items-center gap-2 mb-2 text-yellow-900 cursor-pointer hover:underline" onclick="viewUserProfile('{a["applicant_phone"]}')"><div class="w-6 h-6 bg-yellow-500 rounded-full flex items-center justify-center text-white font-bold text-xs">{html.escape(a["applicant_name"])[0]}</div><strong class="text-lg">{html.escape(a["applicant_name"])}</strong></div><span class="text-xs opacity-75 block mb-1">申请: 《{html.escape(a["title"])}》</span>{f'<div class="text-[10px] text-orange-600 bg-orange-100 px-2 py-0.5 rounded-full inline-block mb-2 font-bold truncate max-w-full" title="{html.escape(a["applicant_honors"])}">🏆 荣誉: {html.escape(a["applicant_honors"])}</div>' if a["applicant_honors"] else ''}{f'<div class="flex gap-2 m-0 mt-1"><button type="button" onclick="submitAudit({a["app_id"]}, {a["proj_id"]}, \'{html.escape(a["applicant_name"])}\', \'accept\')" class="w-1/2 bg-green-100 hover:bg-green-600 hover:text-white text-green-700 transition-colors py-2 rounded-lg text-sm font-bold shadow-sm">同意进组</button><button type="button" onclick="submitAudit({a["app_id"]}, {a["proj_id"]}, \'{html.escape(a["applicant_name"])}\', \'reject\')" class="w-1/2 bg-red-100 hover:bg-red-600 hover:text-white text-red-600 transition-colors py-2 rounded-lg text-sm font-bold shadow-sm">婉拒</button></div>' if a["status"] == "待审核" else f'<div class="mt-2 flex justify-between items-center"><span class="text-xs font-bold text-gray-500">已处理 ({a["status"]})</span><form action="/hide_record" method="post" class="m-0 ajax-form"><input type="hidden" name="app_id" value="{a["app_id"]}"><input type="hidden" name="role" value="leader"><button type="submit" class="text-xs bg-gray-200 hover:bg-red-500 hover:text-white transition-colors px-2 py-1 rounded font-bold text-gray-600">删除记录</button></form></div>'}</li>'''
+        for a in audits])
 
     return {
         "projects": projects_html or '<div class="text-center py-10 text-gray-400 bg-white rounded-xl">大厅空空如也 / 未找到匹配项目</div>',
@@ -625,6 +684,7 @@ GLOBAL_JS = """
 
     setInterval(() => {
         if(isLoggedOut) return;
+
         fetch('/api/check_session').then(res => res.json()).then(data => {
             if (data.status === 'logged_out') { 
                 isLoggedOut = true;
@@ -633,6 +693,7 @@ GLOBAL_JS = """
                 window.location.href = '/login'; 
             }
         });
+
         fetch(`/api/poll_new?since_id=${lastMsgId}`).then(res => res.json()).then(msgs => {
             if (msgs.length > 0) {
                 let maxId = parseInt(lastMsgId);
@@ -649,7 +710,18 @@ GLOBAL_JS = """
                 if(typeof loadChatList === "function") loadChatList();
             }
         });
-        if (window.location.pathname === '/') refreshDashboard();
+
+        // 🌟 修改：轮询智能推荐更新 (纯净后端驱动版)
+        if (window.location.pathname === '/') {
+            fetch(`/api/poll_recommend`).then(res => res.json()).then(data => {
+                if (data.items && data.items.length > 0) {
+                    data.items.forEach(proj => {
+                        showToast('🤖 智能推荐', `刚刚发布了与您技能匹配的新项目：<br><span class="text-indigo-600 font-bold">《${proj.title}》</span>`, 'system');
+                    });
+                    refreshDashboard(); // 发现新项目才刷新面板
+                }
+            });
+        }
     }, 2500);
 """
 
@@ -941,7 +1013,7 @@ async def index(request: Request):
                     <input type="tel" name="phone" placeholder="当前账号验证: 手机号" required class="w-full border p-2.5 rounded-lg outline-none text-sm focus:ring-2 focus:ring-indigo-300">
 
                     <div class="relative">
-                        <input type="password" id="cp0" name="old_password" placeholder="原密码" required class="w-full border p-2.5 rounded-lg outline-none text-sm pr-10 focus:ring-2 focus:ring-indigo-300">
+                        <input type="password" id="cp0" name="old_password" placeholder="原密码" required class="w-full border p-2.5 rounded-lg outline-none text-sm pr-10 focus:ring-2 ring-indigo-300">
                         <span id="ce0" onclick="toggleEye('cp0','ce0')" class="absolute right-3 top-2.5 cursor-pointer opacity-60 hover:opacity-100 transition text-lg">👁️</span>
                     </div>
                     <div class="relative">
@@ -1197,10 +1269,10 @@ async def clear_chat(request: Request, type: str = Form(...), id: str = Form(...
     with sqlite3.connect(DB_FILE, timeout=10) as conn:
         cursor = conn.cursor()
         max_id = \
-        cursor.execute("SELECT MAX(id) FROM messages WHERE chat_type='group' AND target_id=?", (id,)).fetchone()[
-            0] or 0 if type == 'group' else cursor.execute(
-            "SELECT MAX(id) FROM messages WHERE chat_type='private' AND ((sender_phone=? AND target_id=?) OR (sender_phone=? AND target_id=?))",
-            (user['phone'], id, id, user['phone'])).fetchone()[0] or 0
+            cursor.execute("SELECT MAX(id) FROM messages WHERE chat_type='group' AND target_id=?", (id,)).fetchone()[
+                0] or 0 if type == 'group' else cursor.execute(
+                "SELECT MAX(id) FROM messages WHERE chat_type='private' AND ((sender_phone=? AND target_id=?) OR (sender_phone=? AND target_id=?))",
+                (user['phone'], id, id, user['phone'])).fetchone()[0] or 0
         exists = cursor.execute("SELECT 1 FROM chat_state WHERE phone=? AND chat_type=? AND target_id=?",
                                 (user['phone'], type, id)).fetchone()
         if exists:
